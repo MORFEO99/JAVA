@@ -1,0 +1,393 @@
+class ControlAsistencia {
+    constructor() {
+        this.apiBase = 'api/';
+        this.ultimoRegistroId = 0;
+        this.init();
+    }
+
+    init() {
+        this.cargarDashboard();
+        // Cargar usuarios y registros después
+        setTimeout(() => this.cargarUsuarios(), 1000);
+        setTimeout(() => this.cargarRegistros(), 2000);
+        
+        // Actualizar dashboard más frecuente para notificaciones
+        setInterval(() => this.cargarDashboard(), 5000); // Cada 5 segundos
+        
+        // Inicializar sonidos
+        this.sonidoEntrada = document.getElementById('sound-entrada');
+        this.sonidoSalida = document.getElementById('sound-salida');
+        
+        console.log('✅ Sistema de notificaciones activado');
+    }
+
+    async cargarDashboard() {
+        try {
+            const response = await fetch(this.apiBase + 'dashboard.php?t=' + Date.now());
+            const data = await response.json();
+            
+            if (data.success) {
+                this.actualizarDashboard(data);
+                this.verificarNuevosRegistros(data);
+            }
+        } catch (error) {
+            console.log('Dashboard no disponible');
+        }
+    }
+
+    actualizarDashboard(data) {
+        // Actualizar estadísticas básicas
+        if (document.getElementById('total-hoy')) {
+            document.getElementById('total-hoy').textContent = data.total_hoy;
+        }
+        if (document.getElementById('total-usuarios')) {
+            document.getElementById('total-usuarios').textContent = data.total_usuarios;
+        }
+        if (document.getElementById('presentes')) {
+            document.getElementById('presentes').textContent = data.presentes;
+        }
+        
+        // Estado Arduino
+        const estadoArduino = document.getElementById('estado-arduino');
+        const arduinoIcon = document.getElementById('arduino-icon');
+        if (estadoArduino && arduinoIcon) {
+            if (data.arduino_online) {
+                estadoArduino.textContent = 'Conectado';
+                estadoArduino.className = 'online';
+                arduinoIcon.className = 'fas fa-microchip fa-2x online';
+            } else {
+                estadoArduino.textContent = 'Desconectado';
+                estadoArduino.className = 'offline';
+                arduinoIcon.className = 'fas fa-microchip fa-2x offline';
+            }
+        }
+        
+        // Últimos registros
+        if (document.getElementById('ultimos-registros')) {
+            this.mostrarUltimosRegistros(data.ultimos_registros);
+        }
+    }
+
+    verificarNuevosRegistros(data) {
+        // Verificar si hay nuevos registros para mostrar notificación
+        if (data.ultimos_registros && data.ultimos_registros.length > 0) {
+            const ultimoRegistro = data.ultimos_registros[0];
+            
+            // Si es el primer registro o es un nuevo registro
+            if (this.ultimoRegistroId === 0) {
+                // Inicializar con el primer registro
+                this.ultimoRegistroId = ultimoRegistro.id;
+            } else if (ultimoRegistro.id > this.ultimoRegistroId) {
+                // ¡NUEVO REGISTRO DETECTADO!
+                this.mostrarNotificacion(ultimoRegistro);
+                this.ultimoRegistroId = ultimoRegistro.id;
+            }
+        }
+    }
+
+    mostrarNotificacion(registro) {
+        const container = document.getElementById('toast-container');
+        if (!container) return;
+        
+        const tipo = registro.tipo;
+        const icono = tipo === 'entrada' ? '✅' : '🚪';
+        const titulo = tipo === 'entrada' ? 'ENTRADA REGISTRADA' : 'SALIDA REGISTRADA';
+        const claseTipo = tipo === 'entrada' ? 'entrada' : 'salida';
+        const fechaFormateada = this.formatearFecha(registro.fecha_hora);
+        
+        // Crear ID único para el toast
+        const toastId = 'toast-' + Date.now();
+        
+        // Crear HTML del toast
+        const toastHTML = `
+            <div id="${toastId}" class="toast notificacion-toast ${claseTipo}" role="alert" aria-live="assertive" aria-atomic="true" data-bs-delay="5000">
+                <div class="toast-header">
+                    <strong class="me-auto">${icono} ${titulo}</strong>
+                    <small class="text-white">${this.getTiempoRelativo(registro.fecha_hora)}</small>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="toast"></button>
+                </div>
+                <div class="toast-body">
+                    <h5>👤 ${registro.nombre}</h5>
+                    <p class="mb-1">📅 ${fechaFormateada}</p>
+                    <small class="d-block">🔑 UID: ${registro.uid}</small>
+                    <small class="text-muted">ID: ${registro.id}</small>
+                </div>
+            </div>
+        `;
+        
+        // Agregar al contenedor
+        container.insertAdjacentHTML('afterbegin', toastHTML);
+        
+        // Inicializar y mostrar el toast de Bootstrap
+        const toastElement = document.getElementById(toastId);
+        const toast = new bootstrap.Toast(toastElement);
+        toast.show();
+        
+        // Reproducir sonido según el tipo
+        this.reproducirSonido(tipo);
+        
+        // Remover del DOM después de ocultarse
+        toastElement.addEventListener('hidden.bs.toast', () => {
+            toastElement.remove();
+        });
+        
+        console.log(`🔔 Notificación mostrada: ${registro.nombre} - ${tipo}`);
+    }
+
+    reproducirSonido(tipo) {
+        try {
+            if (tipo === 'entrada' && this.sonidoEntrada) {
+                this.sonidoEntrada.currentTime = 0;
+                this.sonidoEntrada.play().catch(e => console.log('Error reproduciendo sonido:', e));
+            } else if (tipo === 'salida' && this.sonidoSalida) {
+                this.sonidoSalida.currentTime = 0;
+                this.sonidoSalida.play().catch(e => console.log('Error reproduciendo sonido:', e));
+            }
+        } catch (error) {
+            console.log('Error con sonido:', error);
+        }
+    }
+
+    formatearFecha(fechaString) {
+        const fecha = new Date(fechaString);
+        return fecha.toLocaleTimeString('es-ES', {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false
+        }) + ' ' + fecha.toLocaleDateString('es-ES');
+    }
+
+    getTiempoRelativo(fechaString) {
+        const ahora = new Date();
+        const fecha = new Date(fechaString);
+        const diffMs = ahora - fecha;
+        const diffSec = Math.floor(diffMs / 1000);
+        
+        if (diffSec < 10) return 'Ahora mismo';
+        if (diffSec < 60) return `Hace ${diffSec} segundos`;
+        if (diffSec < 3600) return `Hace ${Math.floor(diffSec / 60)} minutos`;
+        return `Hace ${Math.floor(diffSec / 3600)} horas`;
+    }
+
+    mostrarUltimosRegistros(registros) {
+        const container = document.getElementById('ultimos-registros');
+        if (!container) return;
+        
+        let html = '';
+        
+        if (registros.length === 0) {
+            html = '<p class="text-muted">No hay registros hoy</p>';
+        } else {
+            registros.forEach(reg => {
+                const tipoClass = reg.tipo === 'entrada' ? 'text-success' : 'text-danger';
+                const icon = reg.tipo === 'entrada' ? 'fa-sign-in-alt' : 'fa-sign-out-alt';
+                const tipoTexto = reg.tipo === 'entrada' ? 'ENTRADA' : 'SALIDA';
+                const fecha = this.formatearFecha(reg.fecha_hora);
+                
+                html += `
+                    <div class="d-flex justify-content-between align-items-center border-bottom py-2">
+                        <div>
+                            <i class="fas ${icon} ${tipoClass} me-2"></i>
+                            <strong>${reg.nombre}</strong>
+                            <small class="text-muted ms-2">(${tipoTexto})</small>
+                        </div>
+                        <div>
+                            <small class="text-muted">${fecha}</small>
+                        </div>
+                    </div>
+                `;
+            });
+        }
+        
+        container.innerHTML = html;
+    }
+
+    async cargarUsuarios() {
+        try {
+            const response = await fetch(this.apiBase + 'usuarios.php');
+            const data = await response.json();
+            
+            if (data.success) {
+                this.mostrarUsuarios(data.usuarios);
+            }
+        } catch (error) {
+            console.error('Error cargando usuarios:', error);
+        }
+    }
+
+    mostrarUsuarios(usuarios) {
+        const container = document.getElementById('tabla-usuarios');
+        if (!container) return;
+        
+        let html = `
+            <table class="table table-striped">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Nombre</th>
+                        <th>UID</th>
+                        <th>Estado</th>
+                        <th>Acciones</th>
+                    </tr>
+                </thead>
+                <tbody>
+        `;
+        
+        if (usuarios.length === 0) {
+            html += '<tr><td colspan="5" class="text-center">No hay usuarios registrados</td></tr>';
+        } else {
+            usuarios.forEach(user => {
+                const estado = user.activo ? 
+                    '<span class="badge bg-success">Activo</span>' : 
+                    '<span class="badge bg-danger">Inactivo</span>';
+                
+                html += `
+                    <tr>
+                        <td>${user.id}</td>
+                        <td>${user.nombre}</td>
+                        <td><code>${user.uid}</code></td>
+                        <td>${estado}</td>
+                        <td>
+                            <button class="btn btn-sm btn-warning" onclick="editarUsuario(${user.id})">
+                                <i class="fas fa-edit"></i>
+                            </button>
+                            <button class="btn btn-sm btn-danger" onclick="eliminarUsuario(${user.id})">
+                                <i class="fas fa-trash"></i>
+                            </button>
+                        </td>
+                    </tr>
+                `;
+            });
+        }
+        
+        html += '</tbody></table>';
+        container.innerHTML = html;
+    }
+
+    async cargarRegistros(fechaInicio = null, fechaFin = null) {
+        try {
+            let url = this.apiBase + 'registros.php';
+            if (fechaInicio && fechaFin) {
+                url += `?fecha_inicio=${fechaInicio}&fecha_fin=${fechaFin}`;
+            }
+            
+            const response = await fetch(url);
+            const data = await response.json();
+            
+            if (data.success) {
+                this.mostrarRegistros(data.registros);
+            }
+        } catch (error) {
+            console.error('Error cargando registros:', error);
+        }
+    }
+
+    mostrarRegistros(registros) {
+        const container = document.getElementById('tabla-registros');
+        if (!container) return;
+        
+        let html = `
+            <table class="table table-striped">
+                <thead>
+                    <tr>
+                        <th>Fecha/Hora</th>
+                        <th>Usuario</th>
+                        <th>Tipo</th>
+                        <th>UID</th>
+                    </tr>
+                </thead>
+                <tbody>
+        `;
+        
+        if (registros.length === 0) {
+            html += '<tr><td colspan="4" class="text-center">No hay registros</td></tr>';
+        } else {
+            registros.forEach(reg => {
+                const tipoText = reg.tipo === 'entrada' ? 
+                    '<span class="badge bg-success">Entrada</span>' : 
+                    '<span class="badge bg-danger">Salida</span>';
+                const fecha = this.formatearFecha(reg.fecha_hora);
+                
+                html += `
+                    <tr>
+                        <td>${fecha}</td>
+                        <td>${reg.nombre}</td>
+                        <td>${tipoText}</td>
+                        <td><code>${reg.uid}</code></td>
+                    </tr>
+                `;
+            });
+        }
+        
+        html += '</tbody></table>';
+        container.innerHTML = html;
+    }
+
+    async guardarUsuario(uid, nombre) {
+        try {
+            const response = await fetch(this.apiBase + 'usuarios.php', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    action: 'create',
+                    uid: uid,
+                    nombre: nombre
+                })
+            });
+            
+            const data = await response.json();
+            
+            if (data.success) {
+                alert('Usuario creado exitosamente');
+                this.cargarUsuarios();
+                // Cerrar modal
+                var modal = bootstrap.Modal.getInstance(document.getElementById('modalUsuario'));
+                modal.hide();
+                // Limpiar formulario
+                document.getElementById('uid').value = '';
+                document.getElementById('nombre').value = '';
+            } else {
+                alert('Error: ' + data.message);
+            }
+        } catch (error) {
+            console.error('Error guardando usuario:', error);
+        }
+    }
+}
+
+// Funciones globales
+function guardarUsuario() {
+    const uid = document.getElementById('uid').value.trim();
+    const nombre = document.getElementById('nombre').value.trim();
+    
+    if (uid && nombre) {
+        app.guardarUsuario(uid, nombre);
+    } else {
+        alert('Por favor complete todos los campos');
+    }
+}
+
+function cargarRegistros() {
+    const fechaInicio = document.getElementById('fecha-inicio').value;
+    const fechaFin = document.getElementById('fecha-fin').value;
+    app.cargarRegistros(fechaInicio, fechaFin);
+}
+
+function editarUsuario(id) {
+    alert('Editar usuario ID: ' + id + ' (Función en desarrollo)');
+}
+
+function eliminarUsuario(id) {
+    if (confirm('¿Está seguro de eliminar este usuario?')) {
+        alert('Eliminar usuario ID: ' + id + ' (Función en desarrollo)');
+    }
+}
+
+// Inicializar aplicación
+document.addEventListener('DOMContentLoaded', function() {
+    window.app = new ControlAsistencia();
+    console.log('✅ Sistema de control de asistencia con notificaciones iniciado');
+});

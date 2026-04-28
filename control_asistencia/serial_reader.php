@@ -1,0 +1,220 @@
+<?php
+class SerialReader {
+    private $port;
+    private $handle;
+    private $apiUrl;
+    private $flagFile;
+    
+    public function __construct($port = 'COM4') {
+        $this->port = $port;
+        $this->apiUrl = 'http://localhost/control_asistencia/api/registrar.php';
+        $this->flagFile = __DIR__ . '/ultimo_registro.flag';
+        $this->connect();
+    }
+    
+    private function connect() {
+        echo "🔌 Conectando a {$this->port}...\n";
+        
+        // Configurar puerto
+        @exec("mode {$this->port} BAUD=9600 DATA=8 PARITY=n STOP=1");
+        
+        $this->handle = @fopen("\\\\.\\{$this->port}", "r");
+        if (!$this->handle) {
+            echo "❌ No se pudo abrir {$this->port}. Reintentando en 5 segundos...\n";
+            sleep(5);
+            $this->connect();
+            return;
+        }
+        
+        // Configuración para Windows
+        stream_set_timeout($this->handle, 1);
+        
+        echo "✅ Conectado a {$this->port}\n";
+        echo "🎯 Esperando tarjetas RFID...\n";
+        echo "----------------------------------------\n";
+        
+        // Inicializar flag file si no existe
+        if (!file_exists($this->flagFile)) {
+            $this->resetFlagFile();
+        }
+    }
+    
+    public function read() {
+        $reconnectCount = 0;
+        
+        while (true) {
+            // Verificar si el handle sigue válido
+            if (!$this->handle || feof($this->handle)) {
+                echo "🔌 Conexión perdida. Reconectando...\n";
+                $this->safeReconnect();
+                $reconnectCount++;
+                
+                // Si hay muchos reconectes, esperar más
+                if ($reconnectCount > 5) {
+                    echo "⚠️ Muchos reconectes. Esperando 10 segundos...\n";
+                    sleep(10);
+                    $reconnectCount = 0;
+                }
+                continue;
+            }
+            
+            // Leer con manejo de errores
+            $data = @fgets($this->handle);
+            
+            if ($data === false) {
+                // Error de lectura, reconectar después de varios intentos
+                static $errorCount = 0;
+                $errorCount++;
+                if ($errorCount > 10) {
+                    $this->safeReconnect();
+                    $errorCount = 0;
+                }
+                continue;
+            }
+            
+            if ($data !== false && trim($data) !== '') {
+                $this->processData(trim($data));
+            }
+            
+            // Pausa para estabilidad
+            usleep(200000); // 200ms
+        }
+    }
+    
+    private function processData($data) {
+        echo "[" . date('H:i:s') . "] " . $data . "\n";
+        
+        // Buscar UID en formato JSON
+        if (preg_match('/\{"uid":"([0-9A-F]{8})"\}/', $data, $matches)) {
+            $uid = $matches[1];
+            echo "🎯 UID: " . $uid . " - ";
+            $this->sendToAPI($uid);
+        }
+    }
+    
+    private function sendToAPI($uid) {
+        $postData = http_build_query(['uid' => $uid]);
+        
+        $context = stream_context_create([
+            'http' => [
+                'method' => 'POST',
+                'header' => 'Content-Type: application/x-www-form-urlencoded',
+                'content' => $postData,
+                'timeout' => 3
+            ]
+        ]);
+        
+        $response = @file_get_contents($this->apiUrl, false, $context);
+        
+        if ($response === FALSE) {
+            echo "❌ Error servidor\n";
+        } else {
+            $result = json_decode($response, true);
+            if ($result && $result['success']) {
+                $tipo = $result['tipo'] == 'entrada' ? 'ENTRADA' : 'SALIDA';
+                echo "✅ {$tipo} - {$result['nombre']}\n";
+                
+                // ⭐⭐ NUEVO: Notificar al frontend que hay un nuevo registro ⭐⭐
+                $this->notificarFrontend($result);
+                
+            } else {
+                echo "❌ " . ($result['message'] ?? 'Error') . "\n";
+            }
+        }
+        
+        echo "----------------------------------------\n";
+    }
+    
+    private function notificarFrontend($data) {
+        // Crear un flag file que el frontend pueda detectar
+        $flagData = [
+            'timestamp' => time(),
+            'registro_id' => $data['registro_id'] ?? 0,
+            'tipo' => $data['tipo'],
+            'nombre' => $data['nombre'],
+            'uid' => $data['uid'] ?? '',
+            'fecha' => $data['fecha'] ?? date('Y-m-d H:i:s'),
+            'notificacion' => true
+        ];
+        
+        if (file_put_contents($this->flagFile, json_encode($flagData))) {
+            echo "📡 Flag creado para frontend\n";
+        } else {
+            echo "⚠️ No se pudo crear flag\n";
+        }
+        
+        // También intentar enviar una señal al dashboard via API
+        $this->pingDashboard();
+    }
+    
+    private function pingDashboard() {
+        // Hacer una petición al dashboard para forzar actualización
+        $dashboardUrl = 'http://localhost/control_asistencia/api/dashboard.php?force=' . time();
+        
+        $context = stream_context_create([
+            'http' => [
+                'method' => 'GET',
+                'timeout' => 1
+            ]
+        ]);
+        
+        // Ejecutar en segundo plano para no bloquear
+        @file_get_contents($dashboardUrl, false, $context);
+        echo "🔄 Dashboard notificado\n";
+    }
+    
+    private function resetFlagFile() {
+        $initialData = [
+            'timestamp' => 0,
+            'registro_id' => 0,
+            'tipo' => '',
+            'nombre' => '',
+            'uid' => '',
+            'fecha' => '',
+            'notificacion' => false
+        ];
+        
+        file_put_contents($this->flagFile, json_encode($initialData));
+    }
+    
+    private function safeReconnect() {
+        if ($this->handle) {
+            @fclose($this->handle);
+            $this->handle = null;
+        }
+        sleep(3);
+        $this->connect();
+    }
+    
+    public function __destruct() {
+        if ($this->handle) {
+            @fclose($this->handle);
+        }
+    }
+}
+
+// Script principal para WINDOWS
+if (php_sapi_name() === 'cli') {
+    echo "🚀 LECTOR RFID - CON NOTIFICACIONES FRONTEND\n";
+    echo "============================================\n";
+    echo "📡 Sistema: Notificará al frontend después de cada registro\n";
+    echo "🔄 Dashboard: Se actualizará automáticamente\n";
+    echo "----------------------------------------\n\n";
+    
+    $port = isset($argv[1]) ? $argv[1] : 'COM4';
+    
+    // Reintentar infinitamente (para Windows)
+    while (true) {
+        try {
+            $reader = new SerialReader($port);
+            $reader->read();
+        } catch (Exception $e) {
+            echo "💥 Error: " . $e->getMessage() . "\n";
+            echo "🔄 Reiniciando en 10 segundos...\n";
+            sleep(10);
+        }
+    }
+} else {
+    echo "Este script debe ejecutarse desde línea de comandos\n";
+}
+?>
